@@ -557,7 +557,7 @@ app.get('/api/wallet/transactions/:userId', async (req, res) => {
 // MATCHES & ODDS
 // ==========================================
 
-const ODDS_API_KEY = process.env.ODDS_API_KEY || '6659e819db0bbdedf3d8d961d32b8ec9';
+const ODDS_API_KEY = process.env.ODDS_API_KEY || '581547add320d504f22fd7454a1140df';
 
 let cachedApiGames = [];
 let lastApiFetchTime = 0;
