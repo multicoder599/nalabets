@@ -28,7 +28,7 @@ app.use((req, res, next) => {
 
 app.use(mongoSanitize());
 
-// CORS
+// CORS Configuration
 app.use(cors({
     origin: function (origin, callback) {
         callback(null, true);
@@ -191,7 +191,7 @@ const BookingSlipSchema = new mongoose.Schema({
     totalOdds: Number,
     potentialReturn: Number,
     currency: String,
-    createdAt: { type: Date, default: Date.now, expires: 86400 }
+    createdAt: { type: Date, default: Date.now, expires: 86400 } // Auto-delete after 24h
 });
 const BookingSlip = mongoose.model('BookingSlip', BookingSlipSchema);
 
@@ -282,9 +282,10 @@ app.post('/api/auth/register', rateLimit({ windowMs: 60 * 60 * 1000, max: 15 }),
 
         await new Notification({
             userId: newUser._id,
-            title: "Welcome!",
-            message: "Your account is ready."
+            title: "Welcome to Nalabets!",
+            message: "Your account is ready. Deposit to start playing."
         }).save();
+        
         sendTelegramMessage(`🎉 <b>NEW USER</b>\n👤 ${username}\n📞 ${phone}`);
 
         const token = jwt.sign({ id: newUser._id, role: 'user' }, JWT_SECRET, { expiresIn: '7d' });
@@ -360,9 +361,12 @@ app.get('/api/user/:id/profile', verifyUserToken, async (req, res) => {
 
 app.get('/api/user/:id/notifications', verifyUserToken, async (req, res) => {
     try {
+        if (req.user.id !== req.params.id && req.user.role !== 'admin') {
+            return res.status(403).json({ error: "Unauthorized" });
+        }
         const notifs = await Notification.find({
             $or: [{ userId: req.params.id }, { userId: null }]
-        }).sort({ date: -1 }).limit(20);
+        }).sort({ date: -1 }).limit(30);
         res.status(200).json(notifs);
     } catch (err) {
         res.status(500).send();
@@ -491,7 +495,7 @@ app.post('/api/megapay/webhook', async (req, res) => {
         await new Notification({
             userId: user._id,
             title: "Deposit Successful",
-            message: `Your deposit of KES ${amount} has been credited. Receipt: ${receipt}`
+            message: `Your deposit of ${user.currency || 'KES'} ${amount} has been credited. Receipt: ${receipt}`
         }).save();
         sendTelegramMessage(`💵 <b>DEPOSIT</b>\n📱 ${user.phone}\n💰 KES ${amount}\n🧾 ${receipt}`);
     } catch (err) {
@@ -515,6 +519,13 @@ app.post('/api/wallet/deposit/manual', verifyUserToken, async (req, res) => {
             userId, type: 'Deposit', method, amount, currency,
             status: 'Pending', proofUrl: proofSubmitted ? 'Proof Submitted' : 'Pending'
         });
+        
+        await new Notification({
+            userId: user._id,
+            title: "Deposit Processing",
+            message: `Your manual deposit of ${currency} ${amount} via ${method} is being reviewed.`
+        }).save();
+
         sendTelegramMessage(`⏳ <b>MANUAL DEPOSIT</b>\n👤 ${user.username}\n💳 ${method}\n💰 ${amount} ${currency}`);
         res.status(200).json({ message: "Deposit requested", balance: user.balance });
     } catch (err) { res.status(500).send(); }
@@ -530,9 +541,17 @@ app.post('/api/wallet/withdraw', verifyUserToken, async (req, res) => {
 
         user.balance -= parseFloat(amount);
         await user.save();
+        
         await Transaction.create({
             userId, type: 'Withdrawal', amount, currency, status: 'Pending'
         });
+
+        await new Notification({
+            userId: user._id,
+            title: "Withdrawal Requested",
+            message: `Your request to withdraw ${currency} ${amount} has been received.`
+        }).save();
+
         sendTelegramMessage(`💸 <b>WITHDRAWAL</b>\n👤 ${user.username}\n💳 ${accountDetails}\n💰 ${amount} ${currency}`);
         res.status(200).json({ message: "Withdrawal requested", balance: user.balance });
     } catch (err) { res.status(500).send(); }
@@ -553,7 +572,9 @@ app.get('/api/wallet/transactions/:userId', verifyUserToken, async (req, res) =>
 
 let cachedApiGames = [];
 let lastApiFetchTime = 0;
-const CACHE_DURATION_MS = 15 * 60 * 1000; // 15 Mins
+// Using a 30-minute cache to stretch the 20,000 requests/month limit. 
+// (9 sports fetched every 30 mins = 18 reqs/hour = 432 reqs/day = 13,392 reqs/month). Very safe.
+const CACHE_DURATION_MS = 30 * 60 * 1000; 
 
 function getMatchTimeStr(startTimeStr) {
     if (!startTimeStr) return "";
@@ -697,6 +718,7 @@ async function fetchAndCacheLiveOdds() {
                 isLive: false,
                 isFeatured: gradeScore > 50,
                 startTime: matchDate.toISOString(),
+                date: matchDate.toISOString().split('T')[0], // Explicitly map date
                 score: null,
                 odds: drawOdds ? [homeOdds, drawOdds, awayOdds] : [homeOdds, null, awayOdds],
                 marketCount: mappedSport === 'football' ? 74 : 12,
@@ -733,6 +755,7 @@ app.get('/api/matches', async (req, res) => {
         const formatted = dbMatches.map(m => {
             const obj = m.toObject();
             obj.startTime = m.startTime ? m.startTime.toISOString() : null;
+            obj.date = obj.date || (obj.startTime ? new Date(obj.startTime).toISOString().split('T')[0] : null);
             obj.detailedMarkets = obj.markets || calculateDetailedMarkets(obj._id.toString(), obj.odds[0], obj.odds[1], obj.odds[2], 'football');
             if (obj.status === 'live' && obj.startTime) {
                 obj.time = getMatchTimeStr(obj.startTime);
@@ -754,6 +777,7 @@ app.get('/api/live-matches', async (req, res) => {
                 id: obj._id.toString(), sport: obj.sport || 'football', league: obj.league || 'League',
                 country: obj.country || 'gb-eng', home: obj.home, away: obj.away, isLive: obj.status === 'live',
                 isFeatured: true, startTime: obj.startTime ? obj.startTime.toISOString() : null,
+                date: obj.date || (obj.startTime ? new Date(obj.startTime).toISOString().split('T')[0] : null),
                 time: obj.status === 'live' ? getMatchTimeStr(obj.startTime) : null,
                 score: obj.score || null, finalScore: obj.finalScore || null,
                 odds: obj.odds || [2.1, 3.1, 2.8],
@@ -851,6 +875,13 @@ app.post('/api/bets/place', verifyUserToken, async (req, res) => {
             userId: user._id, type: 'Bet Placed', amount: -stake,
             currency: newBet.currency, status: 'Completed'
         });
+        
+        await new Notification({
+            userId: user._id,
+            title: "Bet Placed Successfully",
+            message: `Your bet ${newBet.ticketId} of ${newBet.currency} ${stake} has been placed.`
+        }).save();
+
         sendTelegramMessage(`🎲 <b>NEW BET</b>\n👤 ${user.username}\n💰 Stake: ${stake} ${newBet.currency}\n🎯 Win: ${potentialReturn} ${newBet.currency}`);
 
         res.status(201).json({ message: "Bet placed", ticketId: newBet.ticketId, newBalance: user.balance, bet: newBet });
