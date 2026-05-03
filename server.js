@@ -572,7 +572,6 @@ app.get('/api/wallet/transactions/:userId', verifyUserToken, async (req, res) =>
 
 let cachedApiGames = [];
 let lastApiFetchTime = 0;
-// Using a 30-minute cache to stretch the 20,000 requests/month limit. 
 const CACHE_DURATION_MS = 30 * 60 * 1000; 
 
 function getMatchTimeStr(startTimeStr) {
@@ -582,7 +581,7 @@ function getMatchTimeStr(startTimeStr) {
     
     if (elapsedMins < 0) return "Upcoming";
     if (elapsedMins <= 45) return `${elapsedMins}'`;
-    if (elapsedMins > 45 && elapsedMins <= 60) return "HT"; // 15 min break
+    if (elapsedMins > 45 && elapsedMins <= 60) return "HT"; 
     if (elapsedMins > 60 && elapsedMins <= 105) return `${45 + (elapsedMins - 60)}'`;
     if (elapsedMins > 105 && elapsedMins <= 110) return `90+${elapsedMins - 105}'`;
     if (elapsedMins > 110 && elapsedMins <= 115) return "Settling...";
@@ -603,11 +602,11 @@ function getCurrentScore(matchId, startTimeStr, adminResultObj) {
     if (elapsedMins < 45) {
         gameMinute = elapsedMins;
     } else if (elapsedMins >= 45 && elapsedMins < 60) {
-        gameMinute = 45; // HT Break
+        gameMinute = 45; 
     } else if (elapsedMins >= 60 && elapsedMins < 105) {
         gameMinute = 45 + (elapsedMins - 60);
     } else {
-        gameMinute = 90; // FT
+        gameMinute = 90; 
     }
 
     let finalHome = 0;
@@ -617,14 +616,12 @@ function getCurrentScore(matchId, startTimeStr, adminResultObj) {
         finalHome = adminResultObj.homeGoals;
         finalAway = adminResultObj.awayGoals;
     } else {
-        // Fallback Random deterministic
         let seed = 0;
         for (let i = 0; i < matchId.length; i++) seed += matchId.charCodeAt(i);
         finalHome = seed % 4; 
         finalAway = (seed * 3) % 4; 
     }
 
-    // Evenly distribute goals across 90 minutes
     let currentHome = 0;
     let currentAway = 0;
 
@@ -709,7 +706,6 @@ async function fetchAndCacheLiveOdds() {
         
         let allApiMatches = [];
         
-        // Loop sequentially to avoid rate limits
         for (const sport of sportsToFetch) {
             try {
                 const response = await axios.get(
@@ -771,7 +767,7 @@ async function fetchAndCacheLiveOdds() {
                 isLive: false,
                 isFeatured: gradeScore > 50,
                 startTime: matchDate.toISOString(),
-                date: matchDate.toISOString().split('T')[0], // Explicitly map date
+                date: matchDate.toISOString().split('T')[0], 
                 score: null,
                 odds: drawOdds ? [homeOdds, drawOdds, awayOdds] : [homeOdds, null, awayOdds],
                 marketCount: mappedSport === 'football' ? 74 : 12,
@@ -1237,7 +1233,14 @@ setInterval(async () => {
                     const total = hG + aG;
                     const bothScored = (hG > 0 && aG > 0);
 
-                    if (pickStr.match(/^\d+-\d+$/)) { isWin = (pickStr === `${hG}-${aG}`); } 
+                    // ============================================
+                    // FIXED CORRECT SCORE REGEX PARSER
+                    // ============================================
+                    const csMatch = pickStr.match(/\d+-\d+/) || selStr.match(/\d+-\d+/);
+
+                    if (csMatch) { 
+                        isWin = (csMatch[0] === `${hG}-${aG}`); 
+                    } 
                     else if (pickStr.includes('OVER') || pickStr.includes('UNDER') || selStr.includes('OVER') || selStr.includes('UNDER')) {
                         const matchNum = pickStr.match(/\d+(\.\d+)?/) || selStr.match(/\d+(\.\d+)?/);
                         if (matchNum) {
@@ -1254,7 +1257,6 @@ setInterval(async () => {
                     } else if (pickStr === 'ODD' || selStr === 'ODD') { isWin = (total % 2 !== 0); } 
                     else if (pickStr === 'EVEN' || selStr === 'EVEN') { isWin = (total % 2 === 0); } 
                     else {
-                        // Fixed H2H Matching using explicit team names
                         if ((pickStr === '1' || pickStr === homeTeam || selStr === '1' || pickStr.includes('HOME')) && hG > aG) isWin = true;
                         else if ((pickStr === 'X' || pickStr === 'DRAW' || selStr.includes('DRAW')) && hG === aG) isWin = true;
                         else if ((pickStr === '2' || pickStr === awayTeam || selStr === '2' || pickStr.includes('AWAY')) && aG > hG) isWin = true;
