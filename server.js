@@ -157,7 +157,7 @@ const BetSchema = new mongoose.Schema({
     stake: { type: Number, required: true },
     totalOdds: { type: Number, required: true },
     potentialReturn: { type: Number, required: true },
-    status: { type: String, default: 'Open', enum: ['Open', 'Partial', 'Won', 'Lost', 'Cancelled'] },
+    status: { type: String, default: 'Open', enum: ['Open', 'In Play', 'Partial', 'Won', 'Lost', 'Cancelled'] },
     currency: String,
     userTimezone: { type: String, default: 'Africa/Nairobi' },
     bookingCode: { type: String, sparse: true },
@@ -580,14 +580,37 @@ function getMatchTimeStr(startTimeStr) {
     if (!startTimeStr) return "";
     const elapsedMs = new Date().getTime() - new Date(startTimeStr).getTime();
     const elapsedMins = Math.floor(elapsedMs / 60000);
+    
     if (elapsedMins < 0) return "Upcoming";
     if (elapsedMins <= 45) return `${elapsedMins}'`;
     if (elapsedMins > 45 && elapsedMins <= 50) return `45+${elapsedMins - 45}'`;
     if (elapsedMins > 50 && elapsedMins <= 65) return "HT";
     if (elapsedMins > 65 && elapsedMins <= 110) return `${45 + (elapsedMins - 65)}'`;
-    if (elapsedMins > 110 && elapsedMins <= 116) return `90+${elapsedMins - 110}'`;
-    if (elapsedMins > 116 && elapsedMins < 120) return "Settling...";
+    if (elapsedMins > 110 && elapsedMins <= 115) return `90+${elapsedMins - 110}'`;
+    if (elapsedMins > 115 && elapsedMins < 120) return "Settling...";
     return "FT";
+}
+
+// Deterministic 115-minute scaled score generator
+function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
+    const start = new Date(startTimeStr).getTime();
+    const now = new Date().getTime();
+    const elapsed = now - start;
+    if (elapsed < 0) return null;
+
+    const durationMs = 115 * 60 * 1000;
+    let progress = elapsed / durationMs;
+    if (progress > 1) progress = 1;
+
+    if (adminResultObj && adminResultObj.homeGoals !== undefined) {
+        return `${Math.floor(adminResultObj.homeGoals * progress)}-${Math.floor(adminResultObj.awayGoals * progress)}`;
+    }
+
+    let seed = 0;
+    for (let i = 0; i < matchId.length; i++) seed += matchId.charCodeAt(i);
+    const maxHome = seed % 4; 
+    const maxAway = (seed * 3) % 4; 
+    return `${Math.floor(maxHome * progress)}-${Math.floor(maxAway * progress)}`;
 }
 
 // Generate mathematically sound markets based on Moneyline (H2H) base odds
@@ -756,8 +779,10 @@ app.get('/api/matches', async (req, res) => {
             const obj = m.toObject();
             obj.startTime = m.startTime ? m.startTime.toISOString() : null;
             obj.date = obj.date || (obj.startTime ? new Date(obj.startTime).toISOString().split('T')[0] : null);
-            obj.detailedMarkets = obj.markets || calculateDetailedMarkets(obj._id.toString(), obj.odds[0], obj.odds[1], obj.odds[2], 'football');
+            // Fix: Fallback to generation if Admin injected match with empty markets
+            obj.detailedMarkets = (obj.markets && Object.keys(obj.markets).length > 0) ? obj.markets : calculateDetailedMarkets(obj._id.toString(), obj.odds[0], obj.odds[1], obj.odds[2], obj.sport || 'football');
             if (obj.status === 'live' && obj.startTime) {
+                obj.score = getDeterministicScore(obj._id.toString(), obj.startTime, obj.result);
                 obj.time = getMatchTimeStr(obj.startTime);
             }
             return obj;
@@ -779,10 +804,11 @@ app.get('/api/live-matches', async (req, res) => {
                 isFeatured: true, startTime: obj.startTime ? obj.startTime.toISOString() : null,
                 date: obj.date || (obj.startTime ? new Date(obj.startTime).toISOString().split('T')[0] : null),
                 time: obj.status === 'live' ? getMatchTimeStr(obj.startTime) : null,
-                score: obj.score || null, finalScore: obj.finalScore || null,
+                score: obj.status === 'live' ? getDeterministicScore(obj._id.toString(), obj.startTime, obj.result) : null,
+                finalScore: obj.finalScore || null,
                 odds: obj.odds || [2.1, 3.1, 2.8],
-                marketCount: obj.markets ? (Object.keys(obj.markets).length * 5 + 20) : 50,
-                detailedMarkets: obj.markets || calculateDetailedMarkets(obj._id.toString(), obj.odds[0], obj.odds[1], obj.odds[2], 'football'),
+                marketCount: obj.markets && Object.keys(obj.markets).length > 0 ? (Object.keys(obj.markets).length * 5 + 20) : 74,
+                detailedMarkets: (obj.markets && Object.keys(obj.markets).length > 0) ? obj.markets : calculateDetailedMarkets(obj._id.toString(), obj.odds[0] || 2.1, obj.odds[1] || 3.1, obj.odds[2] || 2.8, obj.sport || 'football'),
                 gradeScore: 1000, status: obj.status, result: obj.result || null
             };
         });
@@ -895,7 +921,22 @@ app.get('/api/bets/user/:userId', verifyUserToken, async (req, res) => {
     try {
         if (req.user.id !== req.params.userId && req.user.role !== 'admin') return res.status(403).json({ error: "Unauthorized access." });
         const bets = await Bet.find({ userId: req.params.userId }).sort({ date: -1 });
-        res.status(200).json(bets);
+        
+        const now = new Date();
+        const mappedBets = bets.map(b => {
+            const betObj = b.toObject();
+            let hasInPlay = false;
+            betObj.legs.forEach(leg => {
+                if (leg.status === 'Open' && leg.startTime && new Date(leg.startTime) <= now) {
+                    leg.status = 'In Play';
+                    hasInPlay = true;
+                }
+            });
+            if (betObj.status === 'Open' && hasInPlay) betObj.status = 'In Play';
+            return betObj;
+        });
+
+        res.status(200).json(mappedBets);
     } catch (err) {
         res.status(500).send();
     }
@@ -1026,7 +1067,7 @@ app.get('/api/admin/bets', verifyAdminToken, async (req, res) => {
 app.put('/api/admin/bets/:id/cancel', verifyAdminToken, async (req, res) => {
     try {
         const bet = await Bet.findById(req.params.id);
-        if (!bet || (bet.status !== 'Open' && bet.status !== 'Partial')) return res.status(400).send();
+        if (!bet || (bet.status !== 'Open' && bet.status !== 'Partial' && bet.status !== 'In Play')) return res.status(400).send();
 
         bet.status = 'Cancelled';
         await bet.save();
@@ -1072,10 +1113,10 @@ app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
         const now = new Date().getTime();
         const start = new Date(match.startTime).getTime();
         const elapsed = now - start;
-        const twoHours = 2 * 60 * 60 * 1000;
+        const duration = 115 * 60 * 1000;
 
         if (elapsed < 0) { updateData.status = 'upcoming'; updateData.isLive = false; } 
-        else if (elapsed >= 0 && elapsed < twoHours) { updateData.status = 'live'; updateData.isLive = true; } 
+        else if (elapsed >= 0 && elapsed < duration) { updateData.status = 'live'; updateData.isLive = true; } 
         else {
             if (isLive !== undefined) updateData.isLive = isLive;
             if (status !== undefined) updateData.status = status;
@@ -1097,7 +1138,7 @@ setInterval(async () => {
             { status: 'upcoming', startTime: { $lte: now } },
             { $set: { status: 'live', isLive: true } }
         );
-        const twoHoursAgo = new Date(now.getTime() - (2 * 60 * 60 * 1000));
+        const twoHoursAgo = new Date(now.getTime() - (120 * 60 * 1000));
         await Match.updateMany(
             { status: 'live', startTime: { $lte: twoHoursAgo } },
             { $set: { status: 'completed', isLive: false } }
@@ -1108,7 +1149,7 @@ setInterval(async () => {
 setInterval(async () => {
     try {
         const openBets = await Bet.find({
-            status: { $in: ['Open', 'Partial'] }
+            status: { $in: ['Open', 'In Play', 'Partial'] }
         }).populate('userId');
 
         const now = new Date();
@@ -1117,12 +1158,12 @@ setInterval(async () => {
             let betUpdated = false, allSettled = true, hasLost = false;
 
             for (let leg of bet.legs) {
-                if (leg.status !== 'Open') {
+                if (leg.status !== 'Open' && leg.status !== 'In Play') {
                     if (leg.status === 'Lost') hasLost = true;
                     continue;
                 }
 
-                const settlementTime = new Date(new Date(leg.startTime).getTime() + (2 * 60 * 60 * 1000));
+                const settlementTime = new Date(new Date(leg.startTime).getTime() + (120 * 60 * 1000));
                 if (now < settlementTime) { allSettled = false; continue; }
 
                 let matchResult = null;
@@ -1136,7 +1177,7 @@ setInterval(async () => {
                     if (matchResult.result && matchResult.result.homeGoals !== undefined && matchResult.result.awayGoals !== undefined) {
                         resultObj = matchResult.result;
                     } else {
-                        const scoreStr = matchResult.finalScore || matchResult.score;
+                        const scoreStr = matchResult.finalScore || matchResult.score || getDeterministicScore(matchResult._id.toString(), matchResult.startTime, null);
                         if (typeof scoreStr === 'string' && scoreStr.includes('-')) {
                             const parts = scoreStr.split('-').map(s => parseInt(s.trim()));
                             if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
@@ -1178,7 +1219,6 @@ setInterval(async () => {
                         else if ((pickStr === '2' || selStr === '2' || pickStr.includes('AWAY')) && aG > hG) isWin = true;
                     }
                 } else {
-                    // Fallback simulated outcome if no DB record
                     isWin = Math.random() > 0.5;
                 }
 
