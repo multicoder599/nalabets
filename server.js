@@ -573,7 +573,6 @@ app.get('/api/wallet/transactions/:userId', verifyUserToken, async (req, res) =>
 let cachedApiGames = [];
 let lastApiFetchTime = 0;
 // Using a 30-minute cache to stretch the 20,000 requests/month limit. 
-// (9 sports fetched every 30 mins = 18 reqs/hour = 432 reqs/day = 13,392 reqs/month). Very safe.
 const CACHE_DURATION_MS = 30 * 60 * 1000; 
 
 function getMatchTimeStr(startTimeStr) {
@@ -583,34 +582,65 @@ function getMatchTimeStr(startTimeStr) {
     
     if (elapsedMins < 0) return "Upcoming";
     if (elapsedMins <= 45) return `${elapsedMins}'`;
-    if (elapsedMins > 45 && elapsedMins <= 50) return `45+${elapsedMins - 45}'`;
-    if (elapsedMins > 50 && elapsedMins <= 65) return "HT";
-    if (elapsedMins > 65 && elapsedMins <= 110) return `${45 + (elapsedMins - 65)}'`;
-    if (elapsedMins > 110 && elapsedMins <= 115) return `90+${elapsedMins - 110}'`;
-    if (elapsedMins > 115 && elapsedMins < 120) return "Settling...";
+    if (elapsedMins > 45 && elapsedMins <= 60) return "HT"; // 15 min break
+    if (elapsedMins > 60 && elapsedMins <= 105) return `${45 + (elapsedMins - 60)}'`;
+    if (elapsedMins > 105 && elapsedMins <= 110) return `90+${elapsedMins - 105}'`;
+    if (elapsedMins > 110 && elapsedMins <= 115) return "Settling...";
     return "FT";
 }
 
-// Deterministic 115-minute scaled score generator
-function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
+// Deterministic evenly distributed score generator over 90 mins
+function getCurrentScore(matchId, startTimeStr, adminResultObj) {
     const start = new Date(startTimeStr).getTime();
     const now = new Date().getTime();
     const elapsed = now - start;
     if (elapsed < 0) return null;
 
-    const durationMs = 115 * 60 * 1000;
-    let progress = elapsed / durationMs;
-    if (progress > 1) progress = 1;
-
-    if (adminResultObj && adminResultObj.homeGoals !== undefined) {
-        return `${Math.floor(adminResultObj.homeGoals * progress)}-${Math.floor(adminResultObj.awayGoals * progress)}`;
+    const elapsedMins = Math.floor(elapsed / 60000);
+    
+    // Map elapsed real time to game time (0-90)
+    let gameMinute = 0;
+    if (elapsedMins < 45) {
+        gameMinute = elapsedMins;
+    } else if (elapsedMins >= 45 && elapsedMins < 60) {
+        gameMinute = 45; // HT Break
+    } else if (elapsedMins >= 60 && elapsedMins < 105) {
+        gameMinute = 45 + (elapsedMins - 60);
+    } else {
+        gameMinute = 90; // FT
     }
 
-    let seed = 0;
-    for (let i = 0; i < matchId.length; i++) seed += matchId.charCodeAt(i);
-    const maxHome = seed % 4; 
-    const maxAway = (seed * 3) % 4; 
-    return `${Math.floor(maxHome * progress)}-${Math.floor(maxAway * progress)}`;
+    let finalHome = 0;
+    let finalAway = 0;
+    
+    if (adminResultObj && adminResultObj.homeGoals !== undefined) {
+        finalHome = adminResultObj.homeGoals;
+        finalAway = adminResultObj.awayGoals;
+    } else {
+        // Fallback Random deterministic
+        let seed = 0;
+        for (let i = 0; i < matchId.length; i++) seed += matchId.charCodeAt(i);
+        finalHome = seed % 4; 
+        finalAway = (seed * 3) % 4; 
+    }
+
+    // Evenly distribute goals across 90 minutes
+    let currentHome = 0;
+    let currentAway = 0;
+
+    for (let i = 1; i <= finalHome; i++) {
+        const goalMinute = Math.floor(90 / (finalHome + 1) * i);
+        if (gameMinute >= goalMinute) currentHome++;
+    }
+
+    for (let i = 1; i <= finalAway; i++) {
+        const goalMinute = Math.floor(90 / (finalAway + 1) * i);
+        let offsetGoalMinute = goalMinute + (matchId.length % 3); 
+        if (offsetGoalMinute > 90) offsetGoalMinute = 90;
+        if (gameMinute >= offsetGoalMinute) currentAway++;
+    }
+
+    return `${currentHome}-${currentAway}`;
 }
 
 // Generate mathematically sound markets based on Moneyline (H2H) base odds
@@ -779,10 +809,9 @@ app.get('/api/matches', async (req, res) => {
             const obj = m.toObject();
             obj.startTime = m.startTime ? m.startTime.toISOString() : null;
             obj.date = obj.date || (obj.startTime ? new Date(obj.startTime).toISOString().split('T')[0] : null);
-            // Fix: Fallback to generation if Admin injected match with empty markets
             obj.detailedMarkets = (obj.markets && Object.keys(obj.markets).length > 0) ? obj.markets : calculateDetailedMarkets(obj._id.toString(), obj.odds[0], obj.odds[1], obj.odds[2], obj.sport || 'football');
             if (obj.status === 'live' && obj.startTime) {
-                obj.score = getDeterministicScore(obj._id.toString(), obj.startTime, obj.result);
+                obj.score = getCurrentScore(obj._id.toString(), obj.startTime, obj.result);
                 obj.time = getMatchTimeStr(obj.startTime);
             }
             return obj;
@@ -804,7 +833,7 @@ app.get('/api/live-matches', async (req, res) => {
                 isFeatured: true, startTime: obj.startTime ? obj.startTime.toISOString() : null,
                 date: obj.date || (obj.startTime ? new Date(obj.startTime).toISOString().split('T')[0] : null),
                 time: obj.status === 'live' ? getMatchTimeStr(obj.startTime) : null,
-                score: obj.status === 'live' ? getDeterministicScore(obj._id.toString(), obj.startTime, obj.result) : null,
+                score: obj.status === 'live' ? getCurrentScore(obj._id.toString(), obj.startTime, obj.result) : null,
                 finalScore: obj.finalScore || null,
                 odds: obj.odds || [2.1, 3.1, 2.8],
                 marketCount: obj.markets && Object.keys(obj.markets).length > 0 ? (Object.keys(obj.markets).length * 5 + 20) : 74,
@@ -1037,17 +1066,25 @@ app.get('/api/admin/matches', verifyAdminToken, async (req, res) => {
 
 app.post('/api/admin/matches', verifyAdminToken, async (req, res) => {
     try {
-        const matchData = req.body;
-        const parsedStart = new Date(matchData.startTime);
-        if (isNaN(parsedStart.getTime())) return res.status(400).send();
+        const matchesData = Array.isArray(req.body) ? req.body : [req.body];
+        let savedMatches = [];
 
-        const newMatch = new Match({
-            ...matchData, status: 'upcoming', isLive: false, startTime: parsedStart,
-            timezone: matchData.timezone || 'UTC', markets: matchData.markets || {}, result: matchData.result || null
-        });
-        await newMatch.save();
-        res.status(201).json({ message: "Match injected", match: newMatch });
-    } catch (err) { res.status(500).send(); }
+        for (let matchData of matchesData) {
+            const parsedStart = new Date(matchData.startTime);
+            if (isNaN(parsedStart.getTime())) continue;
+
+            const newMatch = new Match({
+                ...matchData, status: 'upcoming', isLive: false, startTime: parsedStart,
+                timezone: matchData.timezone || 'UTC', markets: matchData.markets || {}, result: matchData.result || null
+            });
+            await newMatch.save();
+            savedMatches.push(newMatch);
+        }
+
+        res.status(201).json({ message: `${savedMatches.length} Matches injected`, matches: savedMatches });
+    } catch (err) { 
+        res.status(500).send(); 
+    }
 });
 
 app.delete('/api/admin/matches/:id', verifyAdminToken, async (req, res) => {
@@ -1177,7 +1214,7 @@ setInterval(async () => {
                     if (matchResult.result && matchResult.result.homeGoals !== undefined && matchResult.result.awayGoals !== undefined) {
                         resultObj = matchResult.result;
                     } else {
-                        const scoreStr = matchResult.finalScore || matchResult.score || getDeterministicScore(matchResult._id.toString(), matchResult.startTime, null);
+                        const scoreStr = matchResult.finalScore || matchResult.score || getCurrentScore(matchResult._id.toString(), matchResult.startTime, null);
                         if (typeof scoreStr === 'string' && scoreStr.includes('-')) {
                             const parts = scoreStr.split('-').map(s => parseInt(s.trim()));
                             if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
@@ -1190,6 +1227,9 @@ setInterval(async () => {
                 let isWin = false;
                 const pickStr = (leg.pick || '').toString().trim().toUpperCase();
                 const selStr = (leg.selection || '').toString().trim().toUpperCase();
+                
+                const homeTeam = (leg.match || '').split(' vs ')[0]?.trim().toUpperCase();
+                const awayTeam = (leg.match || '').split(' vs ')[1]?.trim().toUpperCase();
 
                 if (resultObj) {
                     const hG = parseInt(resultObj.homeGoals) || 0;
@@ -1205,18 +1245,19 @@ setInterval(async () => {
                             if ((pickStr.includes('OVER') || selStr.includes('OVER')) && total > line) isWin = true;
                             if ((pickStr.includes('UNDER') || selStr.includes('UNDER')) && total < line) isWin = true;
                         }
-                    } else if (pickStr === '1X' || selStr.includes('1X')) { isWin = hG >= aG; } 
-                    else if (pickStr === 'X2' || selStr.includes('X2')) { isWin = aG >= hG; } 
-                    else if (pickStr === '12' || selStr.includes('12')) { isWin = hG !== aG; } 
-                    else if (selStr.includes('BTTS') || pickStr === 'YES' || pickStr === 'NO') {
-                        if ((pickStr === 'YES' || selStr.includes('YES')) && bothScored) isWin = true;
-                        if ((pickStr === 'NO' || selStr.includes('NO')) && !bothScored) isWin = true;
+                    } else if (pickStr.includes('1X') || selStr.includes('1X')) { isWin = hG >= aG; } 
+                    else if (pickStr.includes('X2') || selStr.includes('X2')) { isWin = aG >= hG; } 
+                    else if (pickStr.includes('12') || selStr.includes('12')) { isWin = hG !== aG; } 
+                    else if (selStr.includes('BTTS') || pickStr.includes('BTTS YES') || pickStr.includes('BTTS NO') || pickStr === 'YES' || pickStr === 'NO') {
+                        if ((pickStr.includes('YES') || selStr.includes('YES')) && bothScored) isWin = true;
+                        if ((pickStr.includes('NO') || selStr.includes('NO')) && !bothScored) isWin = true;
                     } else if (pickStr === 'ODD' || selStr === 'ODD') { isWin = (total % 2 !== 0); } 
                     else if (pickStr === 'EVEN' || selStr === 'EVEN') { isWin = (total % 2 === 0); } 
                     else {
-                        if ((pickStr === '1' || selStr === '1' || pickStr.includes('HOME')) && hG > aG) isWin = true;
+                        // Fixed H2H Matching using explicit team names
+                        if ((pickStr === '1' || pickStr === homeTeam || selStr === '1' || pickStr.includes('HOME')) && hG > aG) isWin = true;
                         else if ((pickStr === 'X' || pickStr === 'DRAW' || selStr.includes('DRAW')) && hG === aG) isWin = true;
-                        else if ((pickStr === '2' || selStr === '2' || pickStr.includes('AWAY')) && aG > hG) isWin = true;
+                        else if ((pickStr === '2' || pickStr === awayTeam || selStr === '2' || pickStr.includes('AWAY')) && aG > hG) isWin = true;
                     }
                 } else {
                     isWin = Math.random() > 0.5;
