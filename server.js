@@ -30,7 +30,7 @@ app.use(mongoSanitize());
 
 // CORS Configuration
 app.use(cors({
-    origin: ['https://nalabets.com', 'https://www.nalabets.com'],
+    origin: ['https://nalabets.com', 'https://www.nalabets.com', 'http://localhost:3000'],
         methods: ['GET', 'POST', 'PUT', 'DELETE'],
         credentials: true
 }));
@@ -82,28 +82,6 @@ const getCryptoAddresses = () => ({
     Litecoin: process.env.LTC_ADDRESS || 'ltc_configure_in_env'
 });
 
-// Timezone Helpers
-const getTimezoneFromCountry = (countryCode, phone = '') => {
-    const map = {
-        KE: 'Africa/Nairobi', UG: 'Africa/Kampala', TZ: 'Africa/Dar_es_Salaam',
-        NG: 'Africa/Lagos', ZA: 'Africa/Johannesburg', GH: 'Africa/Accra',
-        GB: 'Europe/London', US: 'America/New_York', CA: 'America/Toronto',
-        AU: 'Australia/Sydney', IN: 'Asia/Kolkata', DE: 'Europe/Berlin',
-        FR: 'Europe/Paris', ES: 'Europe/Madrid', IT: 'Europe/Rome',
-        BR: 'America/Sao_Paulo', MX: 'America/Mexico_City', AE: 'Asia/Dubai'
-    };
-    const p = String(phone).replace(/\D/g, '');
-    if (p.startsWith('254')) return 'Africa/Nairobi';
-    if (p.startsWith('255')) return 'Africa/Dar_es_Salaam';
-    if (p.startsWith('256')) return 'Africa/Kampala';
-    if (p.startsWith('234')) return 'Africa/Lagos';
-    if (p.startsWith('27'))  return 'Africa/Johannesburg';
-    if (p.startsWith('233')) return 'Africa/Accra';
-    if (p.startsWith('44'))  return 'Europe/London';
-    if (p.startsWith('1'))   return 'America/New_York';
-    return map[countryCode] || 'UTC';
-};
-
 // ==========================================
 // SCHEMAS
 // ==========================================
@@ -124,6 +102,7 @@ const UserSchema = new mongoose.Schema({
 const User = mongoose.model('User', UserSchema);
 
 const MatchSchema = new mongoose.Schema({
+    apiId: { type: String, unique: true, sparse: true },
     sport: String,
     league: String,
     country: String,
@@ -157,7 +136,7 @@ const BetSchema = new mongoose.Schema({
     totalOdds: { type: Number, required: true },
     potentialReturn: { type: Number, required: true },
     status: { type: String, default: 'Open', enum: ['Open', 'In Play', 'Partial', 'Won', 'Lost', 'Cancelled'] },
-    currency: String,
+    currency: { type: String, default: 'KES' },
     userTimezone: { type: String, default: 'Africa/Nairobi' },
     bookingCode: { type: String, sparse: true },
     legs: [{
@@ -189,7 +168,7 @@ const BookingSlipSchema = new mongoose.Schema({
     stake: Number,
     totalOdds: Number,
     potentialReturn: Number,
-    currency: String,
+    currency: { type: String, default: 'KES' },
     createdAt: { type: Date, default: Date.now, expires: 86400 } // Auto-delete after 24h
 });
 const BookingSlip = mongoose.model('BookingSlip', BookingSlipSchema);
@@ -265,17 +244,13 @@ app.post('/api/auth/register', rateLimit({ windowMs: 60 * 60 * 1000, max: 15 }),
         if (await User.findOne({ phone }))
             return res.status(400).json({ error: "Phone registered" });
 
-        const cleanPhone = phone.replace(/\D/g, '');
-        const isKenyan = phone.startsWith('+254') || cleanPhone.startsWith('254') ||
-            (cleanPhone.length === 10 && (cleanPhone.startsWith('07') || cleanPhone.startsWith('01')));
-        const currency = isKenyan ? 'KES' : 'USD';
-        const countryCode = isKenyan ? 'KE' : 'US';
-        const timezone = getTimezoneFromCountry(countryCode, phone);
-
         const newUser = new User({
             username, email, phone,
             password: await bcrypt.hash(password, 10),
-            name: username, currency, countryCode, timezone
+            name: username, 
+            currency: 'KES', 
+            countryCode: 'KE', 
+            timezone: 'Africa/Nairobi'
         });
         await newUser.save();
 
@@ -416,7 +391,7 @@ app.post('/api/deposit', async (req, res) => {
             email: process.env.MEGAPAY_EMAIL || 'gleah6423@gmail.com',
             amount: amount,
             msisdn: formattedPhone,
-            callback_url: `${process.env.APP_URL || 'https://api.nalabets.com/api'}/api/megapay/webhook`,
+            callback_url: `${process.env.APP_URL || 'https://api.nalabets.com'}/api/megapay/webhook`,
             description: 'Nalabets Deposit',
             reference: reference
         };
@@ -450,7 +425,7 @@ app.post('/api/deposit', async (req, res) => {
             type: 'Deposit',
             method: method || 'M-Pesa',
             amount: amount,
-            currency: user.currency || 'KES',
+            currency: 'KES',
             status: 'Pending'
         });
 
@@ -494,7 +469,7 @@ app.post('/api/megapay/webhook', async (req, res) => {
         await new Notification({
             userId: user._id,
             title: "Deposit Successful",
-            message: `Your deposit of ${user.currency || 'KES'} ${amount} has been credited. Receipt: ${receipt}`
+            message: `Your deposit of KES ${amount} has been credited. Receipt: ${receipt}`
         }).save();
         sendTelegramMessage(`💵 <b>DEPOSIT</b>\n📱 ${user.phone}\n💰 KES ${amount}\n🧾 ${receipt}`);
     } catch (err) {
@@ -503,36 +478,12 @@ app.post('/api/megapay/webhook', async (req, res) => {
 });
 
 // ==========================================
-// WALLET (MANUAL)
+// WALLET WITHDRAWAL
 // ==========================================
-
-app.post('/api/wallet/deposit/manual', verifyUserToken, async (req, res) => {
-    try {
-        const { userId, amount, currency, method, proofSubmitted } = req.body;
-        if (req.user.id !== userId) return res.status(403).json({ error: "Unauthorized" });
-
-        const user = await User.findById(userId);
-        if (!user) return res.status(404).send();
-
-        await Transaction.create({
-            userId, type: 'Deposit', method, amount, currency,
-            status: 'Pending', proofUrl: proofSubmitted ? 'Proof Submitted' : 'Pending'
-        });
-        
-        await new Notification({
-            userId: user._id,
-            title: "Deposit Processing",
-            message: `Your manual deposit of ${currency} ${amount} via ${method} is being reviewed.`
-        }).save();
-
-        sendTelegramMessage(`⏳ <b>MANUAL DEPOSIT</b>\n👤 ${user.username}\n💳 ${method}\n💰 ${amount} ${currency}`);
-        res.status(200).json({ message: "Deposit requested", balance: user.balance });
-    } catch (err) { res.status(500).send(); }
-});
 
 app.post('/api/wallet/withdraw', verifyUserToken, async (req, res) => {
     try {
-        const { userId, amount, currency, accountDetails } = req.body;
+        const { userId, amount, accountDetails } = req.body;
         if (req.user.id !== userId) return res.status(403).json({ error: "Unauthorized" });
 
         const user = await User.findById(userId);
@@ -542,16 +493,16 @@ app.post('/api/wallet/withdraw', verifyUserToken, async (req, res) => {
         await user.save();
         
         await Transaction.create({
-            userId, type: 'Withdrawal', amount, currency, status: 'Pending'
+            userId, type: 'Withdrawal', amount, currency: 'KES', status: 'Pending'
         });
 
         await new Notification({
             userId: user._id,
             title: "Withdrawal Requested",
-            message: `Your request to withdraw ${currency} ${amount} has been received.`
+            message: `Your request to withdraw KES ${amount} has been received.`
         }).save();
 
-        sendTelegramMessage(`💸 <b>WITHDRAWAL</b>\n👤 ${user.username}\n💳 ${accountDetails}\n💰 ${amount} ${currency}`);
+        sendTelegramMessage(`💸 <b>WITHDRAWAL</b>\n👤 ${user.username}\n💳 ${accountDetails}\n💰 ${amount} KES`);
         res.status(200).json({ message: "Withdrawal requested", balance: user.balance });
     } catch (err) { res.status(500).send(); }
 });
@@ -569,10 +520,6 @@ app.get('/api/wallet/transactions/:userId', verifyUserToken, async (req, res) =>
 // MATCHES & ODDS BACKGROUND ENGINE
 // ==========================================
 
-let cachedApiGames = [];
-let lastApiFetchTime = 0;
-const CACHE_DURATION_MS = 30 * 60 * 1000; 
-
 function getMatchTimeStr(startTimeStr) {
     if (!startTimeStr) return "";
     const elapsedMs = new Date().getTime() - new Date(startTimeStr).getTime();
@@ -587,30 +534,14 @@ function getMatchTimeStr(startTimeStr) {
     return "FT";
 }
 
-// Deterministic evenly distributed score generator over 90 mins
 function getCurrentScore(matchId, startTimeStr, adminResultObj) {
     const start = new Date(startTimeStr).getTime();
-    const now = new Date().getTime();
-    const elapsed = now - start;
-    if (elapsed < 0) return null;
+    const elapsedMins = Math.floor((new Date().getTime() - start) / 60000);
+    if (elapsedMins < 0) return null;
 
-    const elapsedMins = Math.floor(elapsed / 60000);
+    let gameMinute = elapsedMins < 45 ? elapsedMins : elapsedMins < 60 ? 45 : elapsedMins < 105 ? 45 + (elapsedMins - 60) : 90;
     
-    // Map elapsed real time to game time (0-90)
-    let gameMinute = 0;
-    if (elapsedMins < 45) {
-        gameMinute = elapsedMins;
-    } else if (elapsedMins >= 45 && elapsedMins < 60) {
-        gameMinute = 45; 
-    } else if (elapsedMins >= 60 && elapsedMins < 105) {
-        gameMinute = 45 + (elapsedMins - 60);
-    } else {
-        gameMinute = 90; 
-    }
-
-    let finalHome = 0;
-    let finalAway = 0;
-    
+    let finalHome = 0, finalAway = 0;
     if (adminResultObj && adminResultObj.homeGoals !== undefined) {
         finalHome = adminResultObj.homeGoals;
         finalAway = adminResultObj.awayGoals;
@@ -621,25 +552,16 @@ function getCurrentScore(matchId, startTimeStr, adminResultObj) {
         finalAway = (seed * 3) % 4; 
     }
 
-    let currentHome = 0;
-    let currentAway = 0;
-
-    for (let i = 1; i <= finalHome; i++) {
-        const goalMinute = Math.floor(90 / (finalHome + 1) * i);
-        if (gameMinute >= goalMinute) currentHome++;
-    }
-
+    let currentHome = 0, currentAway = 0;
+    for (let i = 1; i <= finalHome; i++) if (gameMinute >= Math.floor(90 / (finalHome + 1) * i)) currentHome++;
     for (let i = 1; i <= finalAway; i++) {
-        const goalMinute = Math.floor(90 / (finalAway + 1) * i);
-        let offsetGoalMinute = goalMinute + (matchId.length % 3); 
-        if (offsetGoalMinute > 90) offsetGoalMinute = 90;
-        if (gameMinute >= offsetGoalMinute) currentAway++;
+        let offset = Math.floor(90 / (finalAway + 1) * i) + (matchId.length % 3);
+        if (gameMinute >= Math.min(offset, 90)) currentAway++;
     }
 
     return `${currentHome}-${currentAway}`;
 }
 
-// Generate mathematically sound markets based on Moneyline (H2H) base odds
 function calculateDetailedMarkets(matchId, homeOdds, drawOdds, awayOdds, sport) {
     let seed = 0;
     for(let i=0; i<matchId.length; i++) seed += matchId.charCodeAt(i);
@@ -651,19 +573,15 @@ function calculateDetailedMarkets(matchId, homeOdds, drawOdds, awayOdds, sport) 
     let markets = {};
 
     if (sport === 'football' && draw > 0) {
-        // Double Chance
         markets.doubleChance = {
             '1x': parseFloat((1 / (1/home + 1/draw) + 0.04).toFixed(2)),
             '12': parseFloat((1 / (1/home + 1/away) + 0.04).toFixed(2)),
             x2: parseFloat((1 / (1/away + 1/draw) + 0.04).toFixed(2))
         };
 
-        // BTTS
         const bttsYesBase = 1.65 + (seed % 15) / 20; 
-        const bttsNoBase = 3.5 - bttsYesBase; 
-        markets.btts = { yes: parseFloat(bttsYesBase.toFixed(2)), no: parseFloat(bttsNoBase.toFixed(2)) };
+        markets.btts = { yes: parseFloat(bttsYesBase.toFixed(2)), no: parseFloat((3.5 - bttsYesBase).toFixed(2)) };
 
-        // Over/Under
         const ouBase = 1.45 + (seed % 10) / 20;
         markets.overUnder = [
             { line: 1.5, over: parseFloat((ouBase - 0.25).toFixed(2)), under: parseFloat((ouBase + 1.1).toFixed(2)) },
@@ -671,7 +589,6 @@ function calculateDetailedMarkets(matchId, homeOdds, drawOdds, awayOdds, sport) 
             { line: 3.5, over: parseFloat((ouBase + 1.4).toFixed(2)), under: parseFloat((ouBase - 0.2).toFixed(2)) }
         ];
 
-        // Correct Score
         markets.correctScore = [
             { score: '1-0', odds: parseFloat((home * 2.2 + (seed%3)).toFixed(2)) },
             { score: '2-0', odds: parseFloat((home * 3.2 + (seed%4)).toFixed(2)) },
@@ -683,24 +600,17 @@ function calculateDetailedMarkets(matchId, homeOdds, drawOdds, awayOdds, sport) 
             { score: '0-0', odds: parseFloat((draw * 2.3 + (seed%3)).toFixed(2)) },
             { score: '2-2', odds: parseFloat((draw * 4.2 + (seed%5)).toFixed(2)) }
         ];
-        markets.h2h = { home, draw, away };
-    } else {
-        // Basketball/Tennis
-        markets.h2h = { home, away };
-        const spreadBase = sport === 'basketball' ? 215.5 : 22.5;
-        markets.overUnder = [
-            { line: spreadBase, over: 1.90, under: 1.90 }
-        ];
     }
     return markets;
 }
 
+// FETCH FROM PARLAY API v4 AND SYNC TO MONGODB
 async function fetchAndCacheLiveOdds() {
     try {
-        console.log("🔄 Fetching live odds from parlay-api.com...");
+        console.log("🔄 Fetching live odds from parlay-api.com (v4)...");
         const sportsToFetch = [
             'soccer_epl', 'soccer_uefa_champs_league', 'soccer_spain_la_liga', 'soccer_italy_serie_a',
-            'basketball_nba', 'tennis_atp', 'baseball_mlb', 'mma_mixed_martial_arts', 'americanfootball_nfl'
+            'basketball_nba', 'tennis_atp', 'mma_mixed_martial_arts'
         ];
         
         let allApiMatches = [];
@@ -708,21 +618,21 @@ async function fetchAndCacheLiveOdds() {
         for (const sport of sportsToFetch) {
             try {
                 const response = await axios.get(
-                    `https://parlay-api.com/v1/sports/${sport}/odds?apiKey=${ODDS_API_KEY}&regions=us,uk,eu&markets=h2h,spreads`
+                    `https://parlay-api.com/v4/sports/${sport}/odds?apiKey=${ODDS_API_KEY}&regions=us,eu,uk&markets=h2h,spreads`
                 );
                 if (response.data && Array.isArray(response.data)) {
                     allApiMatches = allApiMatches.concat(response.data);
                 }
             } catch (e) {
-                console.error(`Failed to fetch sport ${sport}:`, e.message);
+                console.error(`Failed to fetch sport ${sport}:`, e.response?.data || e.message);
             }
         }
         
         const now = new Date();
 
-        cachedApiGames = allApiMatches.map((match) => {
+        for (const match of allApiMatches) {
             const matchDate = new Date(match.commence_time);
-            if (now.getTime() - matchDate.getTime() >= 0) return null;
+            if (now.getTime() - matchDate.getTime() >= 0) continue; // Only process upcoming games
 
             const market = match.bookmakers[0]?.markets[0];
             let homeOdds = 1.90, drawOdds = null, awayOdds = 1.90;
@@ -741,53 +651,39 @@ async function fetchAndCacheLiveOdds() {
             if (match.sport_key.includes('basketball')) mappedSport = 'basketball';
             if (match.sport_key.includes('tennis')) mappedSport = 'tennis';
             if (match.sport_key.includes('mma') || match.sport_key.includes('ufc')) mappedSport = 'mma';
-            if (match.sport_key.includes('icehockey')) mappedSport = 'icehockey';
-            if (match.sport_key.includes('americanfootball')) mappedSport = 'rugby';
-            if (match.sport_key.includes('baseball')) mappedSport = 'baseball';
 
             if (mappedSport === 'football' && !drawOdds) {
                 drawOdds = parseFloat(((homeOdds + awayOdds) / 1.6).toFixed(2));
                 if (drawOdds < 2.5) drawOdds = 3.10;
             }
 
-            let leagueName = match.sport_title || 'League';
-            let gradeScore = mappedSport === 'football' ? 50 : 0;
-            if (match.sport_key.includes('champs_league') || match.sport_key.includes('epl')) gradeScore += 75;
-
             const detailedMarkets = calculateDetailedMarkets(match.id, homeOdds, drawOdds, awayOdds, mappedSport);
 
-            return {
-                id: 'api_' + match.id,
-                sport: mappedSport,
-                region: 'Global',
-                league: leagueName,
-                home: match.home_team,
-                away: match.away_team,
-                isLive: false,
-                isFeatured: gradeScore > 50,
-                startTime: matchDate.toISOString(),
-                date: matchDate.toISOString().split('T')[0], 
-                score: null,
-                odds: drawOdds ? [homeOdds, drawOdds, awayOdds] : [homeOdds, null, awayOdds],
-                marketCount: mappedSport === 'football' ? 74 : 12,
-                detailedMarkets: detailedMarkets,
-                gradeScore: gradeScore,
-                status: 'upcoming',
-                result: null,
-                finalScore: null
-            };
-        }).filter(m => m !== null);
+            await Match.findOneAndUpdate(
+                { apiId: match.id },
+                {
+                    apiId: match.id,
+                    sport: mappedSport,
+                    league: match.sport_title || 'League',
+                    home: match.home_team,
+                    away: match.away_team,
+                    startTime: matchDate,
+                    date: matchDate.toISOString().split('T')[0],
+                    odds: drawOdds ? [homeOdds, drawOdds, awayOdds] : [homeOdds, null, awayOdds],
+                    markets: detailedMarkets
+                },
+                { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
+        }
 
-        lastApiFetchTime = Date.now();
-        console.log(`✅ Cached ${cachedApiGames.length} live matches from Parlay API`);
+        console.log(`✅ Synced ${allApiMatches.length} matches from Parlay API to MongoDB`);
     } catch (e) {
         console.error("Master Odds Fetch Error:", e.message);
     }
 }
 
-// Start polling API on server boot
 fetchAndCacheLiveOdds();
-setInterval(fetchAndCacheLiveOdds, CACHE_DURATION_MS);
+setInterval(fetchAndCacheLiveOdds, 30 * 60 * 1000); // Fetch every 30 minutes
 
 
 // ==========================================
@@ -796,9 +692,7 @@ setInterval(fetchAndCacheLiveOdds, CACHE_DURATION_MS);
 
 app.get('/api/matches', async (req, res) => {
     try {
-        const dbMatches = await Match.find({
-            status: { $in: ['upcoming', 'live'] }
-        }).sort({ startTime: 1 });
+        const dbMatches = await Match.find({ status: { $in: ['upcoming', 'live'] } }).sort({ startTime: 1 });
 
         const formatted = dbMatches.map(m => {
             const obj = m.toObject();
@@ -821,13 +715,14 @@ app.get('/api/matches', async (req, res) => {
 
 app.get('/api/live-matches', async (req, res) => {
     try {
-        const dbMatches = (await Match.find({ status: { $in: ['upcoming', 'live'] } })).map(m => {
+        const dbMatches = await Match.find({ status: { $in: ['upcoming', 'live'] } }).sort({ startTime: 1 }).limit(500);
+        
+        let combined = dbMatches.map(m => {
             const obj = m.toObject();
             return {
                 id: obj._id.toString(), 
                 sport: obj.sport || 'football', 
                 league: obj.league || 'League',
-                country: obj.country || 'gb-eng', 
                 home: obj.home, 
                 away: obj.away, 
                 isLive: obj.status === 'live',
@@ -840,19 +735,11 @@ app.get('/api/live-matches', async (req, res) => {
                 odds: obj.odds || [2.1, 3.1, 2.8],
                 marketCount: obj.markets && Object.keys(obj.markets).length > 0 ? (Object.keys(obj.markets).length * 5 + 20) : 74,
                 detailedMarkets: (obj.markets && Object.keys(obj.markets).length > 0) ? obj.markets : calculateDetailedMarkets(obj._id.toString(), obj.odds[0] || 2.1, obj.odds[1] || 3.1, obj.odds[2] || 2.8, obj.sport || 'football'),
-                gradeScore: 1000, 
-                status: obj.status, 
-                result: obj.result || null
+                status: obj.status
             };
         });
 
-        const now = Date.now();
-        // Safe check in case cachedApiGames is undefined
-        const validCached = typeof cachedApiGames !== 'undefined' ? cachedApiGames.filter(match => (now - new Date(match.startTime).getTime()) < 0) : [];
-
-        let combined = [...dbMatches, ...validCached].sort((a, b) => b.gradeScore - a.gradeScore);
-
-        res.status(200).json(combined.slice(0, 500));
+        res.status(200).json(combined);
     } catch (err) {
         console.error("Live matches error:", err);
         res.status(500).json({ error: "Could not fetch matches" });
@@ -883,7 +770,7 @@ app.get('/api/search', async (req, res) => {
 
 app.post('/api/bets/place', verifyUserToken, async (req, res) => {
     try {
-        let { userId, stake, totalOdds, potentialReturn, currency, legs, bookingCode } = req.body;
+        let { userId, stake, totalOdds, potentialReturn, legs, bookingCode } = req.body;
 
         if (req.user.id !== userId) return res.status(403).json({ error: "Unauthorized action." });
 
@@ -891,11 +778,7 @@ app.post('/api/bets/place', verifyUserToken, async (req, res) => {
         totalOdds = parseFloat(totalOdds);
 
         if (isNaN(stake) || stake <= 0) return res.status(400).json({ error: "Invalid stake" });
-        if (isNaN(totalOdds) || totalOdds < 1) return res.status(400).json({ error: "Invalid odds" });
-
-        potentialReturn = parseFloat((stake * totalOdds).toFixed(2));
-        if (!Array.isArray(legs) || legs.length === 0) return res.status(400).json({ error: "No legs provided" });
-
+        
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ error: "User not found" });
         if (user.balance < stake) return res.status(400).json({ error: "Insufficient balance" });
@@ -905,11 +788,6 @@ app.post('/api/bets/place', verifyUserToken, async (req, res) => {
             if (leg.matchId && mongoose.Types.ObjectId.isValid(leg.matchId)) {
                 const dbMatch = await Match.findById(leg.matchId).select('startTime');
                 if (dbMatch && dbMatch.startTime) legStartTime = dbMatch.startTime;
-            }
-            if (!legStartTime && leg.time && leg.time.includes('•')) {
-                const [dPart, tPart] = leg.time.split(' • ');
-                const parsed = new Date(`${dPart} ${tPart}`);
-                if (!isNaN(parsed)) legStartTime = parsed;
             }
             if (!legStartTime) legStartTime = new Date(Date.now() + 2 * 60 * 60 * 1000);
 
@@ -924,7 +802,7 @@ app.post('/api/bets/place', verifyUserToken, async (req, res) => {
             userId: user._id,
             ticketId: "NB-" + Math.random().toString(36).substring(2, 8).toUpperCase(),
             bookingCode: bookingCode || undefined, stake, totalOdds, potentialReturn,
-            currency: currency || user.currency, userTimezone: user.timezone || 'Africa/Nairobi',
+            currency: 'KES', userTimezone: 'Africa/Nairobi',
             legs: trackedLegs
         });
         await newBet.save();
@@ -934,20 +812,13 @@ app.post('/api/bets/place', verifyUserToken, async (req, res) => {
 
         await Transaction.create({
             userId: user._id, type: 'Bet Placed', amount: -stake,
-            currency: newBet.currency, status: 'Completed'
+            currency: 'KES', status: 'Completed'
         });
         
-        await new Notification({
-            userId: user._id,
-            title: "Bet Placed Successfully",
-            message: `Your bet ${newBet.ticketId} of ${newBet.currency} ${stake} has been placed.`
-        }).save();
-
-        sendTelegramMessage(`🎲 <b>NEW BET</b>\n👤 ${user.username}\n💰 Stake: ${stake} ${newBet.currency}\n🎯 Win: ${potentialReturn} ${newBet.currency}`);
+        sendTelegramMessage(`🎲 <b>NEW BET</b>\n👤 ${user.username}\n💰 Stake: ${stake} KES\n🎯 Win: ${potentialReturn} KES`);
 
         res.status(201).json({ message: "Bet placed", ticketId: newBet.ticketId, newBalance: user.balance, bet: newBet });
     } catch (err) {
-        console.error("Bet placement error:", err);
         res.status(500).json({ error: "Failed to place bet" });
     }
 });
@@ -972,17 +843,15 @@ app.get('/api/bets/user/:userId', verifyUserToken, async (req, res) => {
         });
 
         res.status(200).json(mappedBets);
-    } catch (err) {
-        res.status(500).send();
-    }
+    } catch (err) { res.status(500).send(); }
 });
 
 app.post('/api/bets/save-code', async (req, res) => {
     try {
-        const { code, legs, stake, totalOdds, potentialReturn, currency } = req.body;
+        const { code, legs, stake, totalOdds, potentialReturn } = req.body;
         await BookingSlip.findOneAndUpdate(
             { code: code.toUpperCase() },
-            { code: code.toUpperCase(), legs, stake, totalOdds, potentialReturn, currency },
+            { code: code.toUpperCase(), legs, stake, totalOdds, potentialReturn, currency: 'KES' },
             { upsert: true, new: true }
         );
         res.status(200).json({ success: true, message: "Code saved" });
@@ -1047,7 +916,7 @@ app.put('/api/admin/transactions/:id/:action', verifyAdminToken, async (req, res
                 const user = await User.findById(txn.userId);
                 user.balance += txn.amount;
                 await user.save();
-                await new Notification({ userId: user._id, title: "Deposit Approved", message: `Your deposit of ${txn.amount} ${txn.currency} was approved.` }).save();
+                await new Notification({ userId: user._id, title: "Deposit Approved", message: `Your deposit of KES ${txn.amount} was approved.` }).save();
             }
         } else if (action === 'reject') {
             txn.status = 'Failed';
@@ -1055,7 +924,7 @@ app.put('/api/admin/transactions/:id/:action', verifyAdminToken, async (req, res
                 const user = await User.findById(txn.userId);
                 user.balance += txn.amount;
                 await user.save();
-                await new Notification({ userId: user._id, title: "Withdrawal Rejected", message: `Your withdrawal of ${txn.amount} ${txn.currency} was rejected. Funds returned.` }).save();
+                await new Notification({ userId: user._id, title: "Withdrawal Rejected", message: `Your withdrawal of KES ${txn.amount} was rejected. Funds returned.` }).save();
             }
         }
         await txn.save();
@@ -1243,9 +1112,6 @@ setInterval(async () => {
                     const total = hG + aG;
                     const bothScored = (hG > 0 && aG > 0);
 
-                    // ============================================
-                    // FIXED CORRECT SCORE REGEX PARSER
-                    // ============================================
                     const csMatch = pickStr.match(/\d+-\d+/) || selStr.match(/\d+-\d+/);
 
                     if (csMatch) { 
@@ -1289,7 +1155,7 @@ setInterval(async () => {
                     user.balance += bet.potentialReturn;
                     await user.save();
                     await Transaction.create({ userId: user._id, type: 'Win', amount: bet.potentialReturn, currency: bet.currency, status: 'Success' });
-                    await new Notification({ userId: user._id, title: "Bet Won! 🎉", message: `Your bet ${bet.ticketId} won! ${bet.potentialReturn} ${bet.currency} credited.` }).save();
+                    await new Notification({ userId: user._id, title: "Bet Won! 🎉", message: `Your bet ${bet.ticketId} won! ${bet.potentialReturn} KES credited.` }).save();
                 }
             } else if (betUpdated) { bet.status = 'Partial'; }
 
