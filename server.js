@@ -804,7 +804,8 @@ app.get('/api/matches', async (req, res) => {
             const obj = m.toObject();
             obj.startTime = m.startTime ? m.startTime.toISOString() : null;
             obj.date = obj.date || (obj.startTime ? new Date(obj.startTime).toISOString().split('T')[0] : null);
-            obj.detailedMarkets = (obj.markets && Object.keys(obj.markets).length > 0) ? obj.markets : calculateDetailedMarkets(obj._id.toString(), obj.odds[0], obj.odds[1], obj.odds[2], obj.sport || 'football');
+            obj.detailedMarkets = (obj.markets && Object.keys(obj.markets).length > 0) ? obj.markets : calculateDetailedMarkets(obj._id.toString(), obj.odds[0] || 2.1, obj.odds[1] || 3.1, obj.odds[2] || 2.8, obj.sport || 'football');
+            
             if (obj.status === 'live' && obj.startTime) {
                 obj.score = getCurrentScore(obj._id.toString(), obj.startTime, obj.result);
                 obj.time = getMatchTimeStr(obj.startTime);
@@ -838,8 +839,7 @@ app.get('/api/live-matches', async (req, res) => {
                 finalScore: obj.finalScore || null,
                 odds: obj.odds || [2.1, 3.1, 2.8],
                 marketCount: obj.markets && Object.keys(obj.markets).length > 0 ? (Object.keys(obj.markets).length * 5 + 20) : 74,
-                // FIXED THE SYNTAX ERROR HERE
-                detailedMarkets: (obj.markets && Object.keys(obj.markets).length > 0) ? obj.markets : calculateDetailedMarkets(obj._id.toString(), obj.odds[0] || 2.1, obj.odds[1] || 3.1, obj.odds[2] || 2.8),
+                detailedMarkets: (obj.markets && Object.keys(obj.markets).length > 0) ? obj.markets : calculateDetailedMarkets(obj._id.toString(), obj.odds[0] || 2.1, obj.odds[1] || 3.1, obj.odds[2] || 2.8, obj.sport || 'football'),
                 gradeScore: 1000, 
                 status: obj.status, 
                 result: obj.result || null
@@ -851,34 +851,6 @@ app.get('/api/live-matches', async (req, res) => {
         const validCached = typeof cachedApiGames !== 'undefined' ? cachedApiGames.filter(match => (now - new Date(match.startTime).getTime()) < 0) : [];
 
         let combined = [...dbMatches, ...validCached].sort((a, b) => b.gradeScore - a.gradeScore);
-
-        // --- DUMMY DATA FALLBACK ---
-        // If the database is empty, send these test matches to the frontend
-        if (combined.length === 0) {
-            combined = [
-                {
-                    id: "test-match-1", sport: "football", league: "Premier League",
-                    home: "Arsenal", away: "Chelsea",
-                    isLive: false, isFeatured: true,
-                    startTime: new Date(Date.now() + 86400000).toISOString(), // Tomorrow
-                    odds: [2.10, 3.40, 3.10], marketCount: 45, detailedMarkets: {}
-                },
-                {
-                    id: "test-match-2", sport: "football", league: "Uganda Premier League",
-                    home: "Vipers SC", away: "KCCA FC",
-                    isLive: true, time: "45'", score: "1-0", isFeatured: true,
-                    startTime: new Date(Date.now() - 2700000).toISOString(), // Started 45 mins ago
-                    odds: [1.80, 3.10, 4.50], marketCount: 22, detailedMarkets: {}
-                },
-                {
-                    id: "test-match-3", sport: "football", league: "La Liga",
-                    home: "Real Madrid", away: "Barcelona",
-                    isLive: false, isFeatured: true,
-                    startTime: new Date(Date.now() + 172800000).toISOString(), // In 2 days
-                    odds: [2.50, 3.50, 2.75], marketCount: 56, detailedMarkets: {}
-                }
-            ];
-        }
 
         res.status(200).json(combined.slice(0, 500));
     } catch (err) {
