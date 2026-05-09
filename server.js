@@ -28,12 +28,24 @@ app.use((req, res, next) => {
 
 app.use(mongoSanitize());
 
+// ==========================================
 // CORS Configuration
+// ==========================================
+// REMOVED: CORS is now strictly handled at the Nginx reverse-proxy level.
+// Enabling the cors() middleware here will cause "Multiple CORS values" errors.
+
+/* 
 app.use(cors({
-    origin: ['https://nalabets.com', 'https://www.nalabets.com', 'https://lively-flower-8292.newtonmulti.workers.dev' 'http://localhost:3000'],
-        methods: ['GET', 'POST', 'PUT', 'DELETE'],
-        credentials: true
+    origin: [
+        'https://nalabets.com', 
+        'https://www.nalabets.com', 
+        'https://lively-flower-8292.newtonmulti.workers.dev', 
+        'http://localhost:3000'
+    ],
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    credentials: true
 }));
+*/
 
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
