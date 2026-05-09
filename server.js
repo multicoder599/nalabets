@@ -30,7 +30,7 @@ app.use(mongoSanitize());
 
 // CORS Configuration
 app.use(cors({
-    origin: ['https://nalabets.com', 'https://www.nalabets.com', 'http://localhost:3000'],
+    origin: ['https://nalabets.com', 'https://www.nalabets.com', 'https://lively-flower-8292.newtonmulti.workers.dev' 'http://localhost:3000'],
         methods: ['GET', 'POST', 'PUT', 'DELETE'],
         credentials: true
 }));
