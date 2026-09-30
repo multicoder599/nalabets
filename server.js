@@ -1,6 +1,5 @@
 require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
 const path = require('path');
 const mongoose = require('mongoose');
 const axios = require('axios');
@@ -22,30 +21,11 @@ const ALLOWED_ORIGINS = [
     'http://localhost:3002',
 ];
 
-app.use(cors({
-    origin: function (origin, callback) {
-        // Allow requests with no origin (like mobile apps, curl, Postman, or same-origin)
-        if (!origin) return callback(null, true);
+// CORS is handled entirely by nginx (api.nalabets.com server block).
+// Do NOT add Express cors() here — two Access-Control-Allow-Origin headers make
+// browsers reject the response ("multiple values ... but only one is allowed").
+// Requests that reach Express directly (localhost dev, curl) don't need CORS.
 
-        // Check exact match in allowed list
-        if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-
-        // Safely check if origin strictly ends with .nalabets.com
-        try {
-            const hostname = new URL(origin).hostname;
-            if (hostname === 'nalabets.com' || hostname.endsWith('.nalabets.com')) {
-                return callback(null, true);
-            }
-        } catch (e) {
-            // Invalid URL origin
-        }
-
-        callback(new Error('Not allowed by CORS: ' + origin));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-}));
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -1338,7 +1318,11 @@ app.get('/api/games', async (req, res) => {
         }
 
         allGames = allGames.map(function(g) {
-            const diffMins = g.commenceTime ? Math.floor((Date.now() - new Date(g.commenceTime).getTime()) / 60000) : 0;
+            // Games injected by admin without a kickoff time keep their injected
+            // status ('upcoming'). Previously diffMins fell back to 0 and every
+            // such game was flipped to 'live', making it disappear from the feed.
+            if (!g.commenceTime) return g;
+            const diffMins = Math.floor((Date.now() - new Date(g.commenceTime).getTime()) / 60000);
             const matchName = g.home + " vs " + g.away;
             if (diffMins >= 120 || g.status === 'finished') {
                 g.status = 'finished';
@@ -1667,7 +1651,7 @@ app.get('/api/health', function(req, res) {
 // ==========================================
 // START SERVER
 // ==========================================
-const PORT = process.env.PORT || 3030;
+const PORT = process.env.PORT || 3001;
 server.listen(PORT, function() {
     console.log("🚀 Server live on port " + PORT);
 });
