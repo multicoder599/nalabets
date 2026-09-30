@@ -39,7 +39,7 @@ const MONGO_URI = process.env.MONGO_URI;
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 const MEGAPAY_API_KEY = process.env.MEGAPAY_API_KEY || "MGPYgGQ0Lpl4";
 const MEGAPAY_EMAIL = process.env.MEGAPAY_EMAIL || "gleah6423@gmail.com";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS;
 
 if (!MONGO_URI) {
     console.error("❌ CRITICAL: MONGO_URI is not set in .env file!");
@@ -209,11 +209,17 @@ async function initAdmin() {
         if (!conf) {
             conf = await AdminConfig.create({ id: "global" });
         }
-        if (!conf.passwordHash && ADMIN_PASSWORD) {
-            const salt = await bcrypt.genSalt(10);
-            conf.passwordHash = await bcrypt.hash(ADMIN_PASSWORD, salt);
-            await conf.save();
-            console.log("🔐 Admin password initialized from ENV");
+        if (ADMIN_PASSWORD) {
+            // Env is the source of truth: (re)hash whenever the stored hash
+            // doesn't match — fixes a stale/missing hash (e.g. .env var was
+            // renamed or the DB was seeded before the env existed).
+            const matches = conf.passwordHash ? await bcrypt.compare(ADMIN_PASSWORD, conf.passwordHash) : false;
+            if (!matches) {
+                const salt = await bcrypt.genSalt(10);
+                conf.passwordHash = await bcrypt.hash(ADMIN_PASSWORD, salt);
+                await conf.save();
+                console.log("🔐 Admin password synced from ENV");
+            }
         }
     } catch(e) {
         console.error("Admin init error:", e);
