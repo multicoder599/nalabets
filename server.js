@@ -96,9 +96,10 @@ async function connectDB() {
     }
 }
 
-// Drop leftover unique indexes from older schema versions (e.g. username_1).
+// Drop leftover unique indexes from older schema versions (username_1, email_1, …).
 // A unique index on a field the app never sets makes every 2nd registration
-// fail with E11000 duplicate key { username: null }.
+// fail with E11000 duplicate key { <field>: null }. The current schema only
+// requires `phone` (and _id) to be unique — everything else gets swept.
 let _staleIndexesChecked = false;
 async function cleanupStaleIndexes() {
     if (_staleIndexesChecked) return;
@@ -106,9 +107,15 @@ async function cleanupStaleIndexes() {
         const coll = mongoose.connection.collection('users');
         const indexes = await coll.indexes();
         for (const ix of indexes) {
-            if (ix.name === 'username_1' || (ix.key && 'username' in ix.key)) {
+            if (!ix.unique || ix.name === '_id_') continue;
+            const fields = Object.keys(ix.key || {});
+            const isPhoneOnly = fields.length === 1 && fields[0] === 'phone';
+            if (isPhoneOnly) continue; // this one is supposed to exist
+            try {
                 await coll.dropIndex(ix.name);
                 console.log("🧹 Dropped stale unique index:", ix.name, "— registrations fixed");
+            } catch (dropErr) {
+                console.log("🧹 Stale index", ix.name, "already gone (" + dropErr.message + ")");
             }
         }
     } catch (e) {
