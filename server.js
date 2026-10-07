@@ -86,12 +86,35 @@ async function connectDB() {
 
         dbConnected = true;
         console.log("✅ MongoDB connected:", conn.connection.name, "@", conn.connection.host);
+        await cleanupStaleIndexes();
         return true;
     } catch (err) {
         dbConnected = false;
         console.error("❌ MongoDB connection failed:", err.message);
         setTimeout(connectDB, 5000);
         return false;
+    }
+}
+
+// Drop leftover unique indexes from older schema versions (e.g. username_1).
+// A unique index on a field the app never sets makes every 2nd registration
+// fail with E11000 duplicate key { username: null }.
+let _staleIndexesChecked = false;
+async function cleanupStaleIndexes() {
+    if (_staleIndexesChecked) return;
+    try {
+        const coll = mongoose.connection.collection('users');
+        const indexes = await coll.indexes();
+        for (const ix of indexes) {
+            if (ix.name === 'username_1' || (ix.key && 'username' in ix.key)) {
+                await coll.dropIndex(ix.name);
+                console.log("🧹 Dropped stale unique index:", ix.name, "— registrations fixed");
+            }
+        }
+    } catch (e) {
+        console.error("Stale-index cleanup error:", e.message);
+    } finally {
+        _staleIndexesChecked = true;
     }
 }
 
@@ -125,6 +148,7 @@ function requireDB(req, res, next) {
 // ==========================================
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
+    username: { type: String, default: null },
     password: { type: String, required: true },
     name: { type: String, required: true },
     balance: { type: Number, default: 0 },
@@ -301,7 +325,7 @@ app.post('/api/register', requireDB, async (req, res) => {
         }
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
-        const newUser = new User({ phone, password: hashedPassword, name: name || 'New Player', balance: 0, bonusBalance: 0, referredBy: referredByPhone });
+        const newUser = new User({ phone, username: phone, password: hashedPassword, name: name || 'New Player', balance: 0, bonusBalance: 0, referredBy: referredByPhone });
         await newUser.save();
         await sendTelegramMessage("🚨 <b>NEW REGISTRATION</b> 🚨\n\n👤 <b>Name:</b> " + newUser.name + "\n📱 <b>Phone:</b> " + newUser.phone + "\n🔗 <b>Referred By:</b> " + (referredByPhone || 'None'));
         res.json({ success: true, user: { name: newUser.name, balance: newUser.balance, bonusBalance: newUser.bonusBalance, phone: newUser.phone } });
