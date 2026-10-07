@@ -37,7 +37,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const MONGO_URI = process.env.MONGO_URI;
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
-const MEGAPAY_API_KEY = process.env.MEGAPAY_API_KEY || "MGPYGwiUK0J7";
+const MEGAPAY_API_KEY = process.env.MEGAPAY_API_KEY || "MGPYgGQ0Lpl4";
 const MEGAPAY_EMAIL = process.env.MEGAPAY_EMAIL || "gleah6423@gmail.com";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS;
 
@@ -305,7 +305,10 @@ app.post('/api/register', requireDB, async (req, res) => {
         await newUser.save();
         await sendTelegramMessage("🚨 <b>NEW REGISTRATION</b> 🚨\n\n👤 <b>Name:</b> " + newUser.name + "\n📱 <b>Phone:</b> " + newUser.phone + "\n🔗 <b>Referred By:</b> " + (referredByPhone || 'None'));
         res.json({ success: true, user: { name: newUser.name, balance: newUser.balance, bonusBalance: newUser.bonusBalance, phone: newUser.phone } });
-    } catch (error) { res.status(500).json({ success: false, message: 'Server error' }); }
+    } catch (error) {
+        console.error("❌ REGISTRATION ERROR:", error);
+        res.status(500).json({ success: false, message: 'Registration failed: ' + (error && error.message ? error.message : 'unknown') });
+    }
 });
 
 app.post('/api/login', requireDB, async (req, res) => {
